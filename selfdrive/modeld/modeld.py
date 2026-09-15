@@ -64,7 +64,11 @@ def _use_rknn_driving() -> bool:
     return False
   return os.getenv('USE_RKNN', '1') != '0'
 
-LAT_SMOOTH_SECONDS = 0.0
+# 0.2 s of memory on the model's desired curvature. The fork ships 0.0, which turns the
+# filter off entirely (smooth_value returns the new value untouched); upstream openpilot
+# uses 0.1. Enough to stop the plan stepping frame to frame, not enough to delay corner
+# entry.
+LAT_SMOOTH_SECONDS = 0.2
 LONG_SMOOTH_SECONDS = 0.3
 MIN_LAT_CONTROL_SPEED = 0.3
 
