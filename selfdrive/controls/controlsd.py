@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
+import collections
 import math
+import time
 from numbers import Number
 
 import numpy as np
@@ -42,16 +44,25 @@ LANE_CORRECTION_MIN_PROB = 0.5      # both lane lines must be at least this prob
 LANE_CORRECTION_MAX_OFFSET_M = 1.5  # reject implausible lane-centre offsets
 LANE_CORRECTION_MAX_LAT_ACC = 0.3   # m/s^2 of extra lateral acceleration the correction may ask for
 LANE_CORRECTION_MIN_SPEED = 5.0     # m/s
+LANE_CORRECTION_MIN_LOOKAHEAD_M = 10.0  # floor on the lookahead at low speed
+
+# One-second memory for the lane geometry. Lane lines are noisy frame to frame — worse at
+# night — so the correction acts on the median of the last second of accepted offsets
+# rather than on a single frame. When the lines drop out briefly it reuses that window for
+# at most LANE_MEMORY_HOLD_S, and only while the car is going straight: a stale offset
+# carried into a corner would steer toward where the lane used to be. A lane change or a
+# longer dropout clears the memory instead of trusting it.
+LANE_MEMORY_WINDOW_S = 1.0          # median window (0.0 -> act on each frame, as before)
+LANE_MEMORY_HOLD_S = 0.4            # how long a remembered offset survives a dropout
+LANE_MEMORY_MAX_YAW_RATE = 0.15     # rad/s; above this, never trust a stale offset
 
 
-def lane_centre_curvature(model_v2, v_ego):
-  """Curvature that steers the car back toward the lane centre, from lane geometry.
+def lane_centre_offset(model_v2, v_ego):
+  """Lateral offset of the lane centre from the car, measured from the lane lines.
 
-  The offset is measured between the most probable lane line on each side of the car, at
-  the lookahead distance. In the model frame +y is to the left, so a lane centre to the
-  left of the car (+offset) yields positive curvature. Returns None when the measurement
-  is not trustworthy (missing/low-probability lines, no line on both sides, implausible
-  lane width or offset).
+  In the model frame +y is to the left, so a lane centre to the left of the car gives a
+  positive offset. Returns None when the measurement is not trustworthy (missing or
+  low-probability lines, no line on both sides, implausible lane width or offset).
   """
   probs = list(model_v2.laneLineProbs)
   lines = list(model_v2.laneLines)
@@ -92,11 +103,68 @@ def lane_centre_curvature(model_v2, v_ego):
   if abs(centre_offset) > LANE_CORRECTION_MAX_OFFSET_M:
     return None
 
+  return centre_offset
+
+
+def lane_curvature_from_offset(centre_offset, v_ego, lookahead):
+  """Pure-pursuit curvature for an offset, bounded by a lateral-acceleration budget.
+
+  Bounding by acceleration rather than by a flat curvature cap keeps the correction gentle
+  at speed instead of clamping it everywhere.
+  """
   curvature = 2.0 * centre_offset / (lookahead ** 2)
-  # Bound the request by a lateral-acceleration budget rather than a fixed curvature, so the
-  # correction stays gentle at speed instead of being flat-clamped everywhere.
   max_curvature = LANE_CORRECTION_MAX_LAT_ACC / max(float(v_ego) ** 2, 1.0)
   return float(np.clip(curvature, -max_curvature, max_curvature))
+
+
+def lane_centre_curvature(model_v2, v_ego):
+  """One-shot lane-centre curvature, for callers that keep no memory."""
+  centre_offset = lane_centre_offset(model_v2, v_ego)
+  if centre_offset is None:
+    return None
+  lookahead = max(float(v_ego) * LANE_CORRECTION_LOOKAHEAD_S, LANE_CORRECTION_MIN_LOOKAHEAD_M)
+  return lane_curvature_from_offset(centre_offset, v_ego, lookahead)
+
+
+class LaneCentreMemory:
+  """Lane-centre offset with a one-second memory: median window plus a bounded hold.
+
+  Offset sign follows lane_centre_offset (+ = lane centre is left of the car).
+  """
+
+  def __init__(self, window_s=LANE_MEMORY_WINDOW_S, hold_s=LANE_MEMORY_HOLD_S, dt=DT_CTRL):
+    self.use_window = window_s > 0.0
+    self._offsets = collections.deque(maxlen=max(1, int(round(max(window_s, dt) / dt))))
+    self.hold_s = hold_s
+    self._last_good_t = None
+
+  def reset(self):
+    """Forget everything — used on disengage, low speed and lane changes."""
+    self._offsets.clear()
+    self._last_good_t = None
+
+  @property
+  def samples(self):
+    return len(self._offsets)
+
+  def update(self, model_v2, v_ego, yaw_rate, now):
+    """Remembered lane-centre offset for this frame, or None when there is nothing to use.
+
+    `now` is a monotonic clock in seconds; injecting it keeps the hold testable.
+    """
+    offset = lane_centre_offset(model_v2, v_ego)
+    if offset is not None:
+      self._offsets.append(offset)
+      self._last_good_t = now
+      return float(np.median(self._offsets)) if self.use_window else offset
+
+    # Dropout: reuse the remembered window only briefly, and only while going straight.
+    if (self._last_good_t is not None and (now - self._last_good_t) <= self.hold_s
+        and abs(yaw_rate) <= LANE_MEMORY_MAX_YAW_RATE and len(self._offsets) > 0):
+      return float(np.median(self._offsets))
+
+    self.reset()
+    return None
 
 
 class Controls:
@@ -120,6 +188,7 @@ class Controls:
     self.pose_calibrator = PoseCalibrator()
     self.calibrated_pose: Pose | None = None
     self.cem = ConditionalExperimentalMode()
+    self.lane_centre = LaneCentreMemory()
 
     self.LoC = LongControl(self.CP)
     self.VM = VehicleModel(self.CP)
@@ -196,12 +265,17 @@ class Controls:
     new_desired_curvature = model_v2.action.desiredCurvature if CC.latActive else self.curvature
 
     # Lane-centre correction: nudge the car back toward the middle of the lane using the
-    # model's lane lines. Skipped during lane changes, at low speed, and whenever the lane
-    # geometry is not trustworthy (the helper returns None).
+    # model's lane lines, through a one-second memory so it tracks lane geometry instead of
+    # frame-to-frame noise. Skipped during lane changes (which also clears the memory) and
+    # at low speed; the estimator returns None when the geometry cannot be trusted.
     if CC.latActive and CS.vEgo > LANE_CORRECTION_MIN_SPEED and model_v2.meta.laneChangeState == LaneChangeState.off:
-      lane_curvature = lane_centre_curvature(model_v2, CS.vEgo)
-      if lane_curvature is not None:
-        new_desired_curvature += LANE_CORRECTION_GAIN * lane_curvature
+      centre_offset = self.lane_centre.update(model_v2, CS.vEgo, float(model_v2.orientationRate.z[0]),
+                                              time.monotonic())
+      if centre_offset is not None:
+        lookahead = max(CS.vEgo * LANE_CORRECTION_LOOKAHEAD_S, LANE_CORRECTION_MIN_LOOKAHEAD_M)
+        new_desired_curvature += LANE_CORRECTION_GAIN * lane_curvature_from_offset(centre_offset, CS.vEgo, lookahead)
+    else:
+      self.lane_centre.reset()
 
     self.desired_curvature, curvature_limited = clip_curvature(CS.vEgo, self.desired_curvature, new_desired_curvature, lp.roll)
     lat_delay = self.sm["liveDelay"].lateralDelay + LAT_SMOOTH_SECONDS
