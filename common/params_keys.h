@@ -105,6 +105,8 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"NavSettingTime24h", {PERSISTENT, BOOL}},
     {"LongitudinalPersonality", {PERSISTENT, INT, std::to_string(static_cast<int>(cereal::LongitudinalPersonality::STANDARD))}},
     {"NetworkMetered", {PERSISTENT, BOOL}},
+    // Hermes: runtime gain for the lane-centre correction (0.0 = off, the shipped default)
+    {"LaneCorrectionGain", {PERSISTENT, FLOAT, "0.0"}},
     {"ObdMultiplexingChanged", {CLEAR_ON_MANAGER_START | CLEAR_ON_ONROAD_TRANSITION, BOOL}},
     {"ObdMultiplexingEnabled", {CLEAR_ON_MANAGER_START | CLEAR_ON_ONROAD_TRANSITION, BOOL}},
     {"Offroad_CarUnrecognized", {CLEAR_ON_MANAGER_START | CLEAR_ON_ONROAD_TRANSITION, JSON}},

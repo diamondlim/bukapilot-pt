@@ -49,7 +49,9 @@ ACTUATOR_FIELDS = tuple(car.CarControl.Actuators.schema.fields.keys())
 # drives), and pure pursuit over a 30 m lookahead turns that into roughly 0.024 m/s^2 of
 # extra lateral acceleration at 0.15 — i.e. nothing. 0.5 gives ~0.08 m/s^2 for an 18 cm
 # offset, still well inside the 0.3 m/s^2 budget; raise toward 1.0 for a firmer centring.
-LANE_CORRECTION_GAIN = 0.5          # 0.0 disables the correction entirely
+LANE_CORRECTION_GAIN = 0.0          # 0.0 disables the correction entirely (the shipped default)
+LANE_CORRECTION_GAIN_PARAM = "LaneCorrectionGain"  # runtime override, so it can be A/B'd on the car
+LANE_CORRECTION_GAIN_MAX = 2.0      # sanity clamp on any override
 LANE_CORRECTION_LOOKAHEAD_S = 1.5   # horizon (at current speed) used for the conversion
 LANE_CORRECTION_MIN_PROB = 0.5      # both lane lines must be at least this probable
 LANE_CORRECTION_MAX_OFFSET_M = 1.5  # reject implausible lane-centre offsets
@@ -66,6 +68,22 @@ LANE_CORRECTION_MIN_LOOKAHEAD_M = 10.0  # floor on the lookahead at low speed
 LANE_MEMORY_WINDOW_S = 1.0          # median window (0.0 -> act on each frame, as before)
 LANE_MEMORY_HOLD_S = 0.4            # how long a remembered offset survives a dropout
 LANE_MEMORY_MAX_YAW_RATE = 0.15     # rad/s; above this, never trust a stale offset
+
+
+def lane_correction_gain(params) -> float:
+  """The correction gain, from the LaneCorrectionGain param when it is set.
+
+  This exists so the correction can be turned up or off on the car by writing one param,
+  instead of redeploying a branch. Unset, unreadable or nonsense -> LANE_CORRECTION_GAIN,
+  which ships as 0.0 (correction off, i.e. the fork's own lateral behaviour).
+  """
+  try:
+    raw = params.get(LANE_CORRECTION_GAIN_PARAM, return_default=True)
+    if raw is None or str(raw).strip() == "":
+      return LANE_CORRECTION_GAIN
+    return float(max(0.0, min(LANE_CORRECTION_GAIN_MAX, float(raw))))
+  except Exception:
+    return LANE_CORRECTION_GAIN
 
 
 def lane_centre_offset(model_v2, v_ego):
@@ -197,6 +215,8 @@ class Controls:
     self.calibrated_pose: Pose | None = None
     self.cem = ConditionalExperimentalMode()
     self.lane_centre = LaneCentreMemory()
+    self.lane_correction_gain = lane_correction_gain(self.params)
+    self._lane_gain_tick = 0
 
     self.LoC = LongControl(self.CP)
     self.VM = VehicleModel(self.CP)
@@ -278,12 +298,20 @@ class Controls:
     # memory) and at low speed; the estimator returns None when the geometry cannot be
     # trusted. Sign: +y is to the car's right and a positive curvature bends right, so a
     # positive offset is corrected with a positive curvature.
-    if CC.latActive and CS.vEgo > LANE_CORRECTION_MIN_SPEED and model_v2.meta.laneChangeState == LaneChangeState.off:
+    # Re-read the gain about once a second: a param write takes effect without a redeploy.
+    self._lane_gain_tick += 1
+    if self._lane_gain_tick >= 100:
+      self._lane_gain_tick = 0
+      self.lane_correction_gain = lane_correction_gain(self.params)
+
+    # With the gain at 0 the block below is skipped entirely and the memory is held reset, so
+    # desired curvature is the model's own — identical to the fork's stock lateral behaviour.
+    if self.lane_correction_gain > 0.0 and CC.latActive and CS.vEgo > LANE_CORRECTION_MIN_SPEED and model_v2.meta.laneChangeState == LaneChangeState.off:
       centre_offset = self.lane_centre.update(model_v2, CS.vEgo, float(model_v2.orientationRate.z[0]),
                                               time.monotonic())
       if centre_offset is not None:
         lookahead = max(CS.vEgo * LANE_CORRECTION_LOOKAHEAD_S, LANE_CORRECTION_MIN_LOOKAHEAD_M)
-        new_desired_curvature += LANE_CORRECTION_GAIN * lane_curvature_from_offset(centre_offset, CS.vEgo, lookahead)
+        new_desired_curvature += self.lane_correction_gain * lane_curvature_from_offset(centre_offset, CS.vEgo, lookahead)
     else:
       self.lane_centre.reset()
 

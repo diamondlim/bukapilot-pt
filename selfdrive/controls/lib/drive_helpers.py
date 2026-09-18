@@ -10,10 +10,7 @@ MAX_CURVATURE = 0.2
 MAX_VEL_ERR = 5.0  # m/s
 
 # EU guidelines
-# 6.0 is a deliberate, modest step above the 5.0 guidance. The curvature-rate clamp is
-# MAX_LATERAL_JERK / v^2, so this only bites at speed (corner entry); the 5.0 value makes
-# entry feel lazy there. Raise further only with test data.
-MAX_LATERAL_JERK = 6.0  # m/s^3
+MAX_LATERAL_JERK = 5.0  # m/s^3
 MAX_LATERAL_ACCEL_NO_ROLL = 3.0  # m/s^2
 
 
