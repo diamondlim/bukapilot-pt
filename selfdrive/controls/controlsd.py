@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-import collections
 import math
 import time
 from numbers import Number
@@ -59,15 +58,19 @@ LANE_CORRECTION_MAX_LAT_ACC = 0.3   # m/s^2 of extra lateral acceleration the co
 LANE_CORRECTION_MIN_SPEED = 5.0     # m/s
 LANE_CORRECTION_MIN_LOOKAHEAD_M = 10.0  # floor on the lookahead at low speed
 
-# One-second memory for the lane geometry. Lane lines are noisy frame to frame — worse at
-# night — so the correction acts on the median of the last second of accepted offsets
-# rather than on a single frame. When the lines drop out briefly it reuses that window for
-# at most LANE_MEMORY_HOLD_S, and only while the car is going straight: a stale offset
-# carried into a corner would steer toward where the lane used to be. A lane change or a
-# longer dropout clears the memory instead of trusting it.
-LANE_MEMORY_WINDOW_S = 1.0          # median window (0.0 -> act on each frame, as before)
-LANE_MEMORY_HOLD_S = 0.4            # how long a remembered offset survives a dropout
-LANE_MEMORY_MAX_YAW_RATE = 0.15     # rad/s; above this, never trust a stale offset
+# Memory and shaping for the lane geometry. Lane lines are noisy frame to frame — worse at
+# night — so the offset is low-passed rather than used raw. The first attempt used a sliding
+# median: good noise rejection, but its output is piecewise-constant — every window slide
+# moves the value in a step, and a step in the injected curvature is felt as steering jerk.
+# A first-order filter has no steps, and the slew limiter caps the correction's own jerk by
+# construction. Both are switchable: tau 0.0 acts on each frame raw, rate 0.0 is unlimited.
+# On a brief dropout the filtered value is held for at most LANE_MEMORY_HOLD_S, and only
+# while going straight: a stale offset carried into a corner would steer toward where the
+# lane used to be. A lane change or a longer dropout clears the memory.
+LANE_CORRECTION_FILTER_TAU_S = 0.5   # s; first-order time constant (0.0 -> use each frame raw)
+LANE_CORRECTION_MAX_ACC_RATE = 0.9   # m/s^2 per s; how fast the correction may change (0.0 -> unlimited)
+LANE_MEMORY_HOLD_S = 0.4             # how long a remembered offset survives a dropout
+LANE_MEMORY_MAX_YAW_RATE = 0.15      # rad/s; above this, never trust a stale offset
 
 
 def lane_correction_gain(params) -> float:
@@ -143,6 +146,16 @@ def lane_curvature_from_offset(centre_offset, v_ego, lookahead):
   return float(np.clip(curvature, -max_curvature, max_curvature))
 
 
+def lane_extra_lat_acc(centre_offset, v_ego, lookahead):
+  """The extra lateral acceleration the correction asks for, m/s^2.
+
+  Same magnitude as before (the clamp lives in lane_curvature_from_offset), but expressed as
+  acceleration so a slew limit can bound it in physical units rather than in curvature.
+  """
+  curvature = lane_curvature_from_offset(centre_offset, v_ego, lookahead)
+  return float(curvature * max(float(v_ego) ** 2, 1.0))
+
+
 def lane_centre_curvature(model_v2, v_ego):
   """One-shot lane-centre curvature, for callers that keep no memory."""
   centre_offset = lane_centre_offset(model_v2, v_ego)
@@ -153,44 +166,77 @@ def lane_centre_curvature(model_v2, v_ego):
 
 
 class LaneCentreMemory:
-  """Lane-centre offset with a one-second memory: median window plus a bounded hold.
+  """Lane-centre offset with memory: a first-order filter plus a bounded hold.
 
   Offset sign follows lane_centre_offset (+ = lane centre is left of the car).
   """
 
-  def __init__(self, window_s=LANE_MEMORY_WINDOW_S, hold_s=LANE_MEMORY_HOLD_S, dt=DT_CTRL):
-    self.use_window = window_s > 0.0
-    self._offsets = collections.deque(maxlen=max(1, int(round(max(window_s, dt) / dt))))
+  def __init__(self, tau_s=LANE_CORRECTION_FILTER_TAU_S, hold_s=LANE_MEMORY_HOLD_S, dt=DT_CTRL):
+    self.alpha = 1.0 - math.exp(-dt / tau_s) if tau_s > 0.0 else 1.0
     self.hold_s = hold_s
+    self._value = None
+    self._samples = 0
     self._last_good_t = None
 
   def reset(self):
     """Forget everything — used on disengage, low speed and lane changes."""
-    self._offsets.clear()
+    self._value = None
+    self._samples = 0
     self._last_good_t = None
 
   @property
   def samples(self):
-    return len(self._offsets)
+    return self._samples
 
   def update(self, model_v2, v_ego, yaw_rate, now):
-    """Remembered lane-centre offset for this frame, or None when there is nothing to use.
+    """Filtered lane-centre offset for this frame, or None when there is nothing to use.
 
     `now` is a monotonic clock in seconds; injecting it keeps the hold testable.
     """
     offset = lane_centre_offset(model_v2, v_ego)
     if offset is not None:
-      self._offsets.append(offset)
+      self._value = offset if self._value is None else self._value + self.alpha * (offset - self._value)
+      self._samples += 1
       self._last_good_t = now
-      return float(np.median(self._offsets)) if self.use_window else offset
+      return self._value
 
-    # Dropout: reuse the remembered window only briefly, and only while going straight.
+    # Dropout: reuse the filtered value only briefly, and only while going straight.
     if (self._last_good_t is not None and (now - self._last_good_t) <= self.hold_s
-        and abs(yaw_rate) <= LANE_MEMORY_MAX_YAW_RATE and len(self._offsets) > 0):
-      return float(np.median(self._offsets))
+        and abs(yaw_rate) <= LANE_MEMORY_MAX_YAW_RATE and self._value is not None):
+      return self._value
 
     self.reset()
     return None
+
+
+class LaneAccelSlew:
+  """Bounds how fast the correction's own lateral-acceleration request may change.
+
+  The correction asks for a small extra lateral acceleration; the *rate* at which that
+  request moves is what a torque controller turns into steering jerk. Capping the rate makes
+  the correction's jerk bounded by construction, whatever the lane geometry does.
+  """
+
+  def __init__(self, max_rate=LANE_CORRECTION_MAX_ACC_RATE, dt=DT_CTRL):
+    self.max_rate = max_rate
+    self.dt = dt
+    self._value = 0.0
+
+  def reset(self):
+    self._value = 0.0
+
+  @property
+  def value(self):
+    return self._value
+
+  def limit(self, requested):
+    """Return the rate-limited request, in m/s^2."""
+    if self.max_rate > 0.0:
+      step = self.max_rate * self.dt
+      self._value += float(np.clip(float(requested) - self._value, -step, step))
+    else:
+      self._value = float(requested)
+    return self._value
 
 
 class Controls:
@@ -215,6 +261,7 @@ class Controls:
     self.calibrated_pose: Pose | None = None
     self.cem = ConditionalExperimentalMode()
     self.lane_centre = LaneCentreMemory()
+    self.lane_slew = LaneAccelSlew()
     self.lane_correction_gain = lane_correction_gain(self.params)
     self._lane_gain_tick = 0
 
@@ -311,9 +358,12 @@ class Controls:
                                               time.monotonic())
       if centre_offset is not None:
         lookahead = max(CS.vEgo * LANE_CORRECTION_LOOKAHEAD_S, LANE_CORRECTION_MIN_LOOKAHEAD_M)
-        new_desired_curvature += self.lane_correction_gain * lane_curvature_from_offset(centre_offset, CS.vEgo, lookahead)
+        extra_acc = self.lane_correction_gain * lane_extra_lat_acc(centre_offset, CS.vEgo, lookahead)
+        extra_acc = self.lane_slew.limit(extra_acc)
+        new_desired_curvature += extra_acc / max(float(CS.vEgo) ** 2, 1.0)
     else:
       self.lane_centre.reset()
+      self.lane_slew.reset()
 
     self.desired_curvature, curvature_limited = clip_curvature(CS.vEgo, self.desired_curvature, new_desired_curvature, lp.roll)
     lat_delay = self.sm["liveDelay"].lateralDelay + LAT_SMOOTH_SECONDS
