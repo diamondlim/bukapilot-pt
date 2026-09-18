@@ -48,19 +48,16 @@ ACTUATOR_FIELDS = tuple(car.CarControl.Actuators.schema.fields.keys())
 # drives), and pure pursuit over a 30 m lookahead turns that into roughly 0.024 m/s^2 of
 # extra lateral acceleration at 0.15 — i.e. nothing. 0.5 gives ~0.08 m/s^2 for an 18 cm
 # offset, still well inside the 0.3 m/s^2 budget; raise toward 1.0 for a firmer centring.
-# Ships as the *governing* value on this box: the device image is prebuilt, so the compiled
-# params extension predates LaneCorrectionGain and rejects the key (the param below is inert
-# until that extension is rebuilt -- see references/tree-map.md). Python source changes need
-# no build, so this default is what actually takes effect, and the param overrides it as soon
-# as the key is known.
+# A compile-time constant, deliberately. A runtime param would need a new key in
+# common/params_keys.h, and on a prebuilt image that changes the compiled key list, so the tree
+# stops matching the build state the manager validates at startup. Keeping this branch
+# python-only means an install needs no rebuild. Changing the gain costs one commit, not a write.
 #
 # Suspended at 0.0 (stock lateral behaviour, smoothing code inert): the device rebooted within
 # minutes of this being raised to 0.25 and its journal is volatile, so that window cannot be
 # read back and the cause remains unattributed. Raise it again only with a persistent journal
 # in place, so a repeat is diagnosable instead of erased.
-LANE_CORRECTION_GAIN = 0.0 (the shipped default)
-LANE_CORRECTION_GAIN_PARAM = "LaneCorrectionGain"  # runtime override, so it can be A/B'd on the car
-LANE_CORRECTION_GAIN_MAX = 2.0      # sanity clamp on any override
+LANE_CORRECTION_GAIN = 0.0
 LANE_CORRECTION_LOOKAHEAD_S = 1.5   # horizon (at current speed) used for the conversion
 LANE_CORRECTION_MIN_PROB = 0.5      # both lane lines must be at least this probable
 LANE_CORRECTION_MAX_OFFSET_M = 1.5  # reject implausible lane-centre offsets
@@ -81,24 +78,6 @@ LANE_CORRECTION_FILTER_TAU_S = 0.5   # s; first-order time constant (0.0 -> use 
 LANE_CORRECTION_MAX_ACC_RATE = 0.9   # m/s^2 per s; how fast the correction may change (0.0 -> unlimited)
 LANE_MEMORY_HOLD_S = 0.4             # how long a remembered offset survives a dropout
 LANE_MEMORY_MAX_YAW_RATE = 0.15      # rad/s; above this, never trust a stale offset
-
-
-def lane_correction_gain(params) -> float:
-  """The correction gain, from the LaneCorrectionGain param when it is set.
-
-  This exists so the correction can be turned up or off on the car by writing one param,
-  instead of redeploying a branch -- but note the params extension on a prebuilt image may
-  not know the key yet, in which case this always returns LANE_CORRECTION_GAIN and the
-  constant is the live value. Unset, unreadable or nonsense -> LANE_CORRECTION_GAIN,
-  which ships as 0.0 (correction off, i.e. the fork's own lateral behaviour).
-  """
-  try:
-    raw = params.get(LANE_CORRECTION_GAIN_PARAM, return_default=True)
-    if raw is None or str(raw).strip() == "":
-      return LANE_CORRECTION_GAIN
-    return float(max(0.0, min(LANE_CORRECTION_GAIN_MAX, float(raw))))
-  except Exception:
-    return LANE_CORRECTION_GAIN
 
 
 def lane_centre_offset(model_v2, v_ego):
@@ -274,8 +253,7 @@ class Controls:
     self.cem = ConditionalExperimentalMode()
     self.lane_centre = LaneCentreMemory()
     self.lane_slew = LaneAccelSlew()
-    self.lane_correction_gain = lane_correction_gain(self.params)
-    self._lane_gain_tick = 0
+    self.lane_correction_gain = LANE_CORRECTION_GAIN
 
     self.LoC = LongControl(self.CP)
     self.VM = VehicleModel(self.CP)
@@ -358,11 +336,6 @@ class Controls:
     # trusted. Sign: +y is to the car's right and a positive curvature bends right, so a
     # positive offset is corrected with a positive curvature.
     # Re-read the gain about once a second: a param write takes effect without a redeploy.
-    self._lane_gain_tick += 1
-    if self._lane_gain_tick >= 100:
-      self._lane_gain_tick = 0
-      self.lane_correction_gain = lane_correction_gain(self.params)
-
     # With the gain at 0 the block below is skipped entirely and the memory is held reset, so
     # desired curvature is the model's own — identical to the fork's stock lateral behaviour.
     if self.lane_correction_gain > 0.0 and CC.latActive and CS.vEgo > LANE_CORRECTION_MIN_SPEED and model_v2.meta.laneChangeState == LaneChangeState.off:
