@@ -52,8 +52,13 @@ ACTUATOR_FIELDS = tuple(car.CarControl.Actuators.schema.fields.keys())
 # params extension predates LaneCorrectionGain and rejects the key (the param below is inert
 # until that extension is rebuilt -- see references/tree-map.md). Python source changes need
 # no build, so this default is what actually takes effect, and the param overrides it as soon
-# as the key is known. 0.0 = stock lateral behaviour.
-LANE_CORRECTION_GAIN = 0.25 (the shipped default)
+# as the key is known.
+#
+# Suspended at 0.0 (stock lateral behaviour, smoothing code inert): the device rebooted within
+# minutes of this being raised to 0.25 and its journal is volatile, so that window cannot be
+# read back and the cause remains unattributed. Raise it again only with a persistent journal
+# in place, so a repeat is diagnosable instead of erased.
+LANE_CORRECTION_GAIN = 0.0 (the shipped default)
 LANE_CORRECTION_GAIN_PARAM = "LaneCorrectionGain"  # runtime override, so it can be A/B'd on the car
 LANE_CORRECTION_GAIN_MAX = 2.0      # sanity clamp on any override
 LANE_CORRECTION_LOOKAHEAD_S = 1.5   # horizon (at current speed) used for the conversion
