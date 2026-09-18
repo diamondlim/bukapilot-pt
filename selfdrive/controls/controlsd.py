@@ -48,7 +48,12 @@ ACTUATOR_FIELDS = tuple(car.CarControl.Actuators.schema.fields.keys())
 # drives), and pure pursuit over a 30 m lookahead turns that into roughly 0.024 m/s^2 of
 # extra lateral acceleration at 0.15 — i.e. nothing. 0.5 gives ~0.08 m/s^2 for an 18 cm
 # offset, still well inside the 0.3 m/s^2 budget; raise toward 1.0 for a firmer centring.
-LANE_CORRECTION_GAIN = 0.0          # 0.0 disables the correction entirely (the shipped default)
+# Ships as the *governing* value on this box: the device image is prebuilt, so the compiled
+# params extension predates LaneCorrectionGain and rejects the key (the param below is inert
+# until that extension is rebuilt -- see references/tree-map.md). Python source changes need
+# no build, so this default is what actually takes effect, and the param overrides it as soon
+# as the key is known. 0.0 = stock lateral behaviour.
+LANE_CORRECTION_GAIN = 0.25 (the shipped default)
 LANE_CORRECTION_GAIN_PARAM = "LaneCorrectionGain"  # runtime override, so it can be A/B'd on the car
 LANE_CORRECTION_GAIN_MAX = 2.0      # sanity clamp on any override
 LANE_CORRECTION_LOOKAHEAD_S = 1.5   # horizon (at current speed) used for the conversion
@@ -77,7 +82,9 @@ def lane_correction_gain(params) -> float:
   """The correction gain, from the LaneCorrectionGain param when it is set.
 
   This exists so the correction can be turned up or off on the car by writing one param,
-  instead of redeploying a branch. Unset, unreadable or nonsense -> LANE_CORRECTION_GAIN,
+  instead of redeploying a branch -- but note the params extension on a prebuilt image may
+  not know the key yet, in which case this always returns LANE_CORRECTION_GAIN and the
+  constant is the live value. Unset, unreadable or nonsense -> LANE_CORRECTION_GAIN,
   which ships as 0.0 (correction off, i.e. the fork's own lateral behaviour).
   """
   try:
