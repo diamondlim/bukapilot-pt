@@ -93,17 +93,21 @@ LANE_MEMORY_MAX_YAW_RATE = 0.15      # rad/s; above this, never trust a stale of
 # actually being read), so the phone is never offered a knob the car ignores.
 TUNING_PATH = "/data/hermes/tuning.json"
 TUNING_RELOAD_FRAMES = 100          # ~1 s at DT_CTRL = 0.01
+# Every range is one-sided on purpose: the file may move the correction toward the gentler side
+# (less authority, more smoothing, stricter geometry tests) or switch it off entirely, but it can
+# never make it sharper than the code committed here. Turning something *up* is a change to the
+# car's lateral behaviour, and that belongs in a commit with a drive behind it - not in a slider.
 TUNING_LIMITS = {
-  "LANE_CORRECTION_GAIN": (0.0, 1.0),
-  "LANE_CORRECTION_LOOKAHEAD_S": (0.5, 3.0),
-  "LANE_CORRECTION_MIN_PROB": (0.0, 0.99),
-  "LANE_CORRECTION_MAX_OFFSET_M": (0.2, 3.0),
-  "LANE_CORRECTION_MAX_LAT_ACC": (0.0, 0.5),
-  "LANE_CORRECTION_MIN_SPEED": (0.0, 20.0),
-  "LANE_CORRECTION_FILTER_TAU_S": (0.0, 2.0),
-  "LANE_CORRECTION_MAX_ACC_RATE": (0.0, 3.0),
-  "LANE_MEMORY_HOLD_S": (0.0, 1.0),
-  "LANE_MEMORY_MAX_YAW_RATE": (0.0, 0.5),
+  "LANE_CORRECTION_GAIN": (0.0, 1.0),                 # 0.0 = off (stock)
+  "LANE_CORRECTION_LOOKAHEAD_S": (1.5, 3.0),          # further ahead = gentler
+  "LANE_CORRECTION_MIN_PROB": (0.5, 0.99),            # stricter lane-line confidence
+  "LANE_CORRECTION_MAX_OFFSET_M": (0.2, 1.5),         # stricter plausibility bound
+  "LANE_CORRECTION_MAX_LAT_ACC": (0.0, 0.3),          # the shipped budget is the ceiling
+  "LANE_CORRECTION_MIN_SPEED": (5.0, 20.0),           # raise the speed the correction acts at
+  "LANE_CORRECTION_FILTER_TAU_S": (0.5, 2.0),         # more smoothing
+  "LANE_CORRECTION_MAX_ACC_RATE": (0.0, 0.9),         # slower changes; 0.0 = unlimited
+  "LANE_MEMORY_HOLD_S": (0.0, 0.4),                   # hold a stale offset for less time
+  "LANE_MEMORY_MAX_YAW_RATE": (0.0, 0.15),            # trust the held offset in less curvature
 }
 TUNING_BASE = {name: globals()[name] for name in TUNING_LIMITS}
 
