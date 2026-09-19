@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import json
 import math
 import time
 from numbers import Number
@@ -79,6 +80,58 @@ LANE_CORRECTION_FILTER_TAU_S = 0.5   # s; first-order time constant (0.0 -> use 
 LANE_CORRECTION_MAX_ACC_RATE = 0.9   # m/s^2 per s; how fast the correction may change (0.0 -> unlimited)
 LANE_MEMORY_HOLD_S = 0.4             # how long a remembered offset survives a dropout
 LANE_MEMORY_MAX_YAW_RATE = 0.15      # rad/s; above this, never trust a stale offset
+
+# Runtime tuning of everything above. The values are re-read about once a second from a small JSON
+# file, so a knob can be moved while driving and A/B'd without a redeploy or a branch per value.
+# Semantics that keep this safe on a car:
+#   * every key defaults to the constant above, and any key missing from the file (or a file that
+#     is absent, malformed, or out of range) leaves the shipped value in place - the off switch is
+#     "delete the file", not "set a flag";
+#   * values are clamped to a per-key range, so no tuning can ask for something implausible;
+#   * nothing here can raise: a bad tuning file must never be able to take controlsd down.
+# Written by the Bluetooth settings service (which reports each key as live only once this file is
+# actually being read), so the phone is never offered a knob the car ignores.
+TUNING_PATH = "/data/hermes/tuning.json"
+TUNING_RELOAD_FRAMES = 100          # ~1 s at DT_CTRL = 0.01
+TUNING_LIMITS = {
+  "LANE_CORRECTION_GAIN": (0.0, 1.0),
+  "LANE_CORRECTION_LOOKAHEAD_S": (0.5, 3.0),
+  "LANE_CORRECTION_MIN_PROB": (0.0, 0.99),
+  "LANE_CORRECTION_MAX_OFFSET_M": (0.2, 3.0),
+  "LANE_CORRECTION_MAX_LAT_ACC": (0.0, 0.5),
+  "LANE_CORRECTION_MIN_SPEED": (0.0, 20.0),
+  "LANE_CORRECTION_FILTER_TAU_S": (0.0, 2.0),
+  "LANE_CORRECTION_MAX_ACC_RATE": (0.0, 3.0),
+  "LANE_MEMORY_HOLD_S": (0.0, 1.0),
+  "LANE_MEMORY_MAX_YAW_RATE": (0.0, 0.5),
+}
+TUNING_BASE = {name: globals()[name] for name in TUNING_LIMITS}
+
+
+def read_tuning(path=TUNING_PATH, limits=TUNING_LIMITS):
+  """{name: clamped value} for the keys the tuning file actually carries, else {}.
+
+  Pure and importable on its own so the validation is unit-testable off the car.
+  """
+  out = {}
+  try:
+    with open(path) as fh:
+      data = json.load(fh)
+  except Exception:
+    return out
+  if not isinstance(data, dict):
+    return out
+  for name, (low, high) in limits.items():
+    if name not in data:
+      continue
+    try:
+      value = float(data[name])
+    except (TypeError, ValueError):
+      continue
+    if not math.isfinite(value):
+      continue
+    out[name] = float(np.clip(value, low, high))
+  return out
 
 
 def lane_centre_offset(model_v2, v_ego):
@@ -255,6 +308,8 @@ class Controls:
     self.lane_centre = LaneCentreMemory()
     self.lane_slew = LaneAccelSlew()
     self.lane_correction_gain = LANE_CORRECTION_GAIN
+    self._tuning_frame = 0
+    self.apply_lane_tuning(read_tuning())
 
     self.LoC = LongControl(self.CP)
     self.VM = VehicleModel(self.CP)
@@ -266,7 +321,29 @@ class Controls:
     elif self.CP.lateralTuning.which() == 'torque':
       self.LaC = LatControlTorque(self.CP, self.CI, DT_CTRL)
 
+  def apply_lane_tuning(self, tuning):
+    """Push the tuned values to where the correction actually reads them.
+
+    Two places, and both are needed: the module constants are looked up in globals() per call, but
+    the gain, the filter's alpha and the slew limiter's rate were captured when those objects were
+    constructed, so a change to the constant alone would not be felt. Every tunable is reset to its
+    shipped constant first, so removing a key from the file restores the default rather than
+    freezing the last tuned value.
+    """
+    for name, base in TUNING_BASE.items():
+      globals()[name] = tuning.get(name, base)
+    self.lane_correction_gain = tuning.get("LANE_CORRECTION_GAIN", TUNING_BASE["LANE_CORRECTION_GAIN"])
+    tau = tuning.get("LANE_CORRECTION_FILTER_TAU_S", TUNING_BASE["LANE_CORRECTION_FILTER_TAU_S"])
+    self.lane_centre.alpha = 1.0 - math.exp(-DT_CTRL / tau) if tau > 0.0 else 1.0
+    self.lane_centre.hold_s = tuning.get("LANE_MEMORY_HOLD_S", TUNING_BASE["LANE_MEMORY_HOLD_S"])
+    self.lane_slew.max_rate = tuning.get("LANE_CORRECTION_MAX_ACC_RATE",
+                                         TUNING_BASE["LANE_CORRECTION_MAX_ACC_RATE"])
+
   def update(self):
+    self._tuning_frame += 1
+    if self._tuning_frame >= TUNING_RELOAD_FRAMES:
+      self._tuning_frame = 0
+      self.apply_lane_tuning(read_tuning())
     self.sm.update(15)
     if self.sm.updated["liveCalibration"]:
       self.pose_calibrator.feed_live_calib(self.sm['liveCalibration'])
@@ -336,7 +413,8 @@ class Controls:
     # memory) and at low speed; the estimator returns None when the geometry cannot be
     # trusted. Sign: +y is to the car's right and a positive curvature bends right, so a
     # positive offset is corrected with a positive curvature.
-    # Re-read the gain about once a second: a param write takes effect without a redeploy.
+    # The knobs are re-read about once a second (apply_lane_tuning below): a write to the tuning
+    # file takes effect without a redeploy, and with the gain at 0 the block is skipped entirely.
     # With the gain at 0 the block below is skipped entirely and the memory is held reset, so
     # desired curvature is the model's own — identical to the fork's stock lateral behaviour.
     if self.lane_correction_gain > 0.0 and CC.latActive and CS.vEgo > LANE_CORRECTION_MIN_SPEED and model_v2.meta.laneChangeState == LaneChangeState.off:
