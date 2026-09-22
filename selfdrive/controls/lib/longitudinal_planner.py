@@ -13,6 +13,9 @@ from openpilot.selfdrive.controls.lib.longcontrol import LongCtrlState
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import LongitudinalMpc
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import T_IDXS as T_IDXS_MPC
 from openpilot.selfdrive.controls.lib.drive_helpers import CONTROL_N, get_accel_from_plan
+from openpilot.selfdrive.controls.lib.lead_brake import LeadBrake
+from openpilot.selfdrive.controls.lib.lead_brake import read_tuning as read_lead_tuning
+from openpilot.selfdrive.controls.lib.lead_brake import apply_tuning as apply_lead_tuning
 from openpilot.selfdrive.car.cruise import V_CRUISE_MAX, V_CRUISE_UNSET
 from openpilot.common.params import Params
 from openpilot.common.swaglog import cloudlog
@@ -33,6 +36,8 @@ DANGER_DECEL_RAMP_RATE = 1.0  # m/s^3, how quickly danger decel can ramp in
 DANGER_HOLD_SECONDS = 0.2
 BRAKE_MAG_GAIN_MAX_PCT = 100
 BRAKE_MAG_GAIN_STEP_PCT = 10
+# Lead-brake knobs live in the same JSON the lateral tuning reads; reload at ~1 s.
+LB_TUNING_RELOAD_FRAMES = 20
 
 
 def read_brake_mag_gain_pct(params: Params) -> int:
@@ -102,6 +107,10 @@ class LongitudinalPlanner:
     self._danger_override_active = False
     self._danger_hold_until_t = 0.0
     self._danger_decel_cmd = ACCEL_MAX
+    self.lead_brake = LeadBrake()
+    self.lead_brake_active = False
+    self._lb_tuning_frame = 0
+    self._lb_logged = False
 
     self.v_desired_trajectory = np.zeros(CONTROL_N)
     self.a_desired_trajectory = np.zeros(CONTROL_N)
@@ -208,6 +217,26 @@ class LongitudinalPlanner:
     else:
       output_a_target = min(output_a_target_mpc, output_a_target_e2e)
       self.output_should_stop = output_should_stop_e2e or output_should_stop_mpc
+
+    # Brake EARLIER for a lead that is slowing: a queue at a light closes at 1-2 m/s, which the
+    # |vRel| >= 4.5 m/s danger override below never sees. This projects the lead's own
+    # deceleration and caps the plan's output; off by default, and the danger override still
+    # has the final word.
+    self._lb_tuning_frame += 1
+    if self._lb_tuning_frame >= LB_TUNING_RELOAD_FRAMES:
+      self._lb_tuning_frame = 0
+      apply_lead_tuning(read_lead_tuning())
+    lb_req = self.lead_brake.update(v_ego, sm['radarState'].leadOne, now_t=time.monotonic())
+    self.lead_brake_active = lb_req is not None
+    if lb_req is not None:
+      output_a_target = min(float(output_a_target), lb_req['a_req'])
+      if not self._lb_logged:
+        cloudlog.info("lead brake: %.2f m/s^2 at %.0f m gap, lead to %.0f km/h (%s)",
+                      lb_req['a_req'], lb_req['gap'], lb_req['v_lead_pred'] * 3.6,
+                      lb_req['feasibility'])
+        self._lb_logged = True
+    else:
+      self._lb_logged = False
 
     lead = sm['radarState'].leadOne
     v_rel = float(lead.vRel) if lead.status else 0.0
