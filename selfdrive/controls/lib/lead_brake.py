@@ -30,9 +30,9 @@ import numpy as np
 # tuning; every value has an inert state, and every range below is one-sided
 # ---------------------------------------------------------------------------
 LEAD_BRAKE_ENABLED = 0            # 0 = off (stock), 1 = on
-LEAD_BRAKE_LOOK_S = 1.0           # s; how far ahead the lead's own deceleration is projected
-LEAD_BRAKE_MIN_GAP_M = 15.0       # m; the gap the formula aims to match the lead's speed by
-LEAD_BRAKE_TRIGGER = 2.0          # m/s^2; quieter than this and the policy says nothing
+LEAD_BRAKE_LOOK_S = 0.5           # s; how far ahead the lead's own deceleration is projected
+LEAD_BRAKE_MIN_GAP_M = 12.0       # m; the gap the formula aims to match the lead's speed by
+LEAD_BRAKE_TRIGGER = 1.0          # m/s^2; quieter than this and the policy says nothing
 LEAD_BRAKE_A_DEC_MAX = 1.5        # m/s^2; the most this policy may ask for on its own
 LEAD_BRAKE_HOLD_S = 0.5           # s; keep an in-progress request through one noisy frame
 LEAD_BRAKE_MIN_V = 2.0            # m/s; below this the plan's own low-speed logic belongs
@@ -40,21 +40,21 @@ LEAD_BRAKE_MIN_V = 2.0            # m/s; below this the plan's own low-speed log
 # at only 1.2x the rate at which braking follows ANY lead-present frame (58% baseline) - i.e. it
 # was reacting to a noisy vision estimate rather than to a lead that is actually braking. A real
 # response needs the lead to be braking or genuinely closing first:
-LEAD_BRAKE_MIN_LEAD_DECEL = -2.0  # m/s^2; a lead braking at least this hard is projected
-LEAD_BRAKE_MIN_CLOSING = 1.5      # m/s; or a lead closing at least this fast
+LEAD_BRAKE_MIN_LEAD_DECEL = -1.5  # m/s^2; a lead braking at least this hard is projected
+LEAD_BRAKE_MIN_CLOSING = 1.0      # m/s; or a lead closing at least this fast
 LEAD_BRAKE_SMOOTH_TAU = 1.0       # s; EMA on the lead's own deceleration (the vision `a` is noisy)
 LEAD_BRAKE_GATE_FRAMES = 3        # frames (0.15 s at 20 Hz) the lead must be braking/closing for
 
 TUNING_PATH = "/data/hermes/tuning.json"
 TUNING_LIMITS = {
   "LEAD_BRAKE_ENABLED": (0.0, 1.0),        # 0 = off (stock)
-  "LEAD_BRAKE_LOOK_S": (0.0, 1.0),         # less projection = a later, gentler response
-  "LEAD_BRAKE_MIN_GAP_M": (15.0, 25.0),    # aim to match speed further back
-  "LEAD_BRAKE_TRIGGER": (2.0, 3.0),        # a higher bar means it acts less often
+  "LEAD_BRAKE_LOOK_S": (0.0, 0.5),         # less projection = a later, gentler response
+  "LEAD_BRAKE_MIN_GAP_M": (12.0, 25.0),    # aim to match speed further back
+  "LEAD_BRAKE_TRIGGER": (1.0, 2.5),        # a higher bar means it acts less often
   "LEAD_BRAKE_A_DEC_MAX": (0.5, 1.5),      # the shipped 1.5 m/s^2 is the ceiling
   "LEAD_BRAKE_HOLD_S": (0.0, 0.5),         # less memory; 0.0 = stateless
-  "LEAD_BRAKE_MIN_CLOSING": (1.5, 3.0),    # only a genuine closing speed counts
-  "LEAD_BRAKE_MIN_LEAD_DECEL": (-3.5, -2.0),  # more negative = gentler (a stricter bar to act)
+  "LEAD_BRAKE_MIN_CLOSING": (1.0, 3.0),    # only a genuine closing speed counts
+  "LEAD_BRAKE_MIN_LEAD_DECEL": (-3.0, -1.5),  # more negative = gentler (a stricter bar to act)
 }
 
 TUNING_BASE = {
