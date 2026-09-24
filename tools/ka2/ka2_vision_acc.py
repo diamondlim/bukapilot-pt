@@ -56,7 +56,9 @@ LOOKAHEAD_MAX = 160.0        # m
 MIN_V_KMH = 25.0             # below this speed, bends are the driver's business
 MARGIN_KMH = 5.0             # act only when the comfort speed is at least this far under the setpoint
 TRIGGER_S = 3.0              # start stepping this many seconds before the bend entry
-MAX_STEPS = 3                # at most 15 km/h taken off per bend
+MAX_STEPS = 3                # shipped default: at most 15 km/h taken off per bend. The app may raise
+                             # this up to TUNING_LIMITS' 6 (30 km/h) - the floor, the driver's own setpoint
+                             # and the engaged/25 km/h gates are what bound it, not this cap.
 COOLDOWN_S = 2.5             # s between any two presses
 RESTORE_MARGIN_KMH = 5.0     # headroom the road must allow above the next step before raising
 MIN_SETPOINT_KMH = 30.0      # the auto-slow floor: never step the setpoint below this
@@ -71,7 +73,11 @@ TUNING_LIMITS = {
   "VIS_TURN_ACC_MIN_RADIUS": (250.0, 600.0),
   "VIS_TURN_ACC_MIN_V_KMH": (25.0, 70.0),
   "VIS_TURN_ACC_MARGIN_KMH": (5.0, 20.0),
-  "VIS_TURN_ACC_MAX_STEPS": (0.0, 3.0),
+  "VIS_TURN_ACC_MAX_STEPS": (0.0, 6.0),            # 0-6 presses = 0-30 km/h off per bend. Owner's
+                                                   # request (24 Sep 2026): this one range is NOT
+                                                   # one-sided, so the app can raise the cap; the
+                                                   # 30 km/h floor, the driver's own setpoint ceiling
+                                                   # and the engaged/25 km/h gates remain the bounds.
   "VIS_TURN_ACC_COOLDOWN_S": (2.5, 15.0),
   "VIS_TURN_ACC_RESTORE_MARGIN_KMH": (5.0, 25.0),
   "VIS_TURN_ACC_MIN_SETPOINT_KMH": (30.0, 90.0),   # the app's auto-slow floor: raise only, never lower
