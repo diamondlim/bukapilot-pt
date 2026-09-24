@@ -108,6 +108,15 @@ TUNING_TITLES = {
                                    "After the bend the bridge hands the speed back - never above the "
                                    "setpoint you had set yourself, and never above this. Can only be "
                                    "lowered."),
+  "VIS_TURN_ACC_MAX_STEPS": ("Max auto-slow steps per bend",
+                             "How many 5 km/h steps the bridge may take off the ACC setpoint for one "
+                             "bend: 3 = up to 15 km/h, 6 = up to 30 km/h. It still stops at the "
+                             "auto-slow floor and only gives speed back up to the setpoint you set "
+                             "yourself."),
+  "VIS_TURN_ACC_ENABLED": ("Auto-slow for bends (on/off)",
+                           "1 = the bridge may step the ACC setpoint down for a bend the model sees "
+                           "ahead, and hand it back afterwards. 0 = off. Re-read from the tuning file "
+                           "about once a second, so it applies without a restart."),
 }
 # The step each knob moves by when the phone offers +/- buttons rather than a text field, chosen so
 # a useful change is a few presses: 0.05 on a 0-1 gain, 0.5 m/s on the 5-20 m/s speed floor, and a
@@ -126,6 +135,8 @@ TUNING_STEPS = {
   "LANE_MEMORY_MAX_YAW_RATE": 0.025,
   "VIS_TURN_ACC_MIN_SETPOINT_KMH": 5.0,     # one press of the app's + moves the floor a whole ACC step
   "VIS_TURN_ACC_MAX_RESTORE_KMH": 5.0,
+  "VIS_TURN_ACC_MAX_STEPS": 1.0,            # one step at a time: 3 -> 4 -> 5 -> 6
+  "VIS_TURN_ACC_ENABLED": 1.0,              # 0/1 toggle
 }
 # Where each live knob lives, and the name of the module-level constant carrying its shipped default.
 # controlsd names its constants after the keys; the bridge tool keeps shorter constant names, so its two
@@ -134,7 +145,9 @@ VISION_ACC_TOOL = os.environ.get("KA2_VISION_ACC_TOOL", "/data/hermes/ka2_vision
 TUNING_SOURCES = (
   {"path": CONTROLD, "keys": {k: k for k in TUNING_TITLES if k.startswith("LANE_")}},
   {"path": VISION_ACC_TOOL, "keys": {"VIS_TURN_ACC_MIN_SETPOINT_KMH": "MIN_SETPOINT_KMH",
-                                     "VIS_TURN_ACC_MAX_RESTORE_KMH": "MAX_RESTORE_KMH"}},
+                                     "VIS_TURN_ACC_MAX_RESTORE_KMH": "MAX_RESTORE_KMH",
+                                     "VIS_TURN_ACC_MAX_STEPS": "MAX_STEPS",
+                                     "VIS_TURN_ACC_ENABLED": "ENABLED"}},
 )
 _TUNING_CACHE = {"at": 0.0, "limits": {}, "bases": {}, "supported": set()}
 
