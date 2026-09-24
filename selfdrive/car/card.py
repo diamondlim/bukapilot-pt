@@ -12,6 +12,7 @@ from openpilot.common.realtime import config_realtime_process, Priority, Ratekee
 from openpilot.common.swaglog import cloudlog, ForwardingHandler
 
 from opendbc.car import DT_CTRL, structs
+from opendbc.car.byd import acc_button
 from opendbc.car.can_definitions import CanData, CanRecvCallable, CanSendCallable
 from opendbc.car.carlog import carlog
 from opendbc.car.fw_versions import ObdCallback
@@ -58,6 +59,77 @@ def can_comm_callbacks(logcan: messaging.SubSocket, sendcan: messaging.PubSocket
   return can_recv, can_send
 
 
+ACC_REQUEST_PATH = "/data/hermes/acc/request"      # written by /data/hermes/bt_settings_service.py
+ACC_REQUEST_MAX_AGE_S = 3.0                        # ignore a request older than this instead of firing late
+ACC_PRESS_MIN_GAP_S = 0.35
+ACC_PRESS_MAX_FRAMES = 40                          # ~0.4 s ceiling on how long a button may be held
+
+
+def _one_button_frame(state):
+  """One frame of the press in progress, carrying the rolling counter the car's own module uses.
+
+  The counter is not decoration: the car transmits its own idle 0x3B0 frames with a 4-bit counter in the
+  high nibble of byte 6 and a checksum in byte 7, and it ignores a frame whose bytes do not add up. We
+  learned that the hard way - presses with zeros there reached the bus and changed nothing.
+  """
+  state["frames"] -= 1
+  counter = state["counter"]
+  state["counter"] = (counter + 1) & 0x0F
+  data = acc_button.build(state["name"], counter) if state["frames"] > 0 else acc_button.release(counter)
+  return [CanData(acc_button.ADDR_PCM_BUTTONS, data, acc_button.BUS)]
+
+
+def acc_button_frames(CS, state):
+  """Frames for a pending stock-ACC button request, or None.
+
+  Built and sent here, inside card, because msgq allows exactly one publisher per topic and 'sendcan' is
+  card's: a helper process publishing it makes msgq raise MultiplePublishersError inside card and card
+  dies (24 Sep 2026, took the car daemon down until a restart). The request file is written by the box's
+  settings service, consumed once, and ignored if it is stale - a queued press must never fire late.
+
+  Gate: the car's ACC must be **engaged** (cruiseState.enabled), not merely switched on. The owner asked
+  for that deliberately - a press is only allowed while the system is actually active and driving.
+  """
+  if state["frames"] > 0:
+    return _one_button_frame(state)
+
+  try:
+    with open(ACC_REQUEST_PATH) as fh:
+      raw = fh.read().strip()
+    os.remove(ACC_REQUEST_PATH)
+  except OSError:
+    return None
+
+  # "<button> <unix_ms> [frames]" - the optional frame count exists so a press can be tuned from the
+  # bench (how long the car needs the button held); card clamps it so a request can never hold a button
+  # down unreasonably long.
+  parts = raw.split()
+  name = parts[0] if parts else ""
+  ts = parts[1] if len(parts) > 1 else ""
+  held = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else acc_button.FRAMES
+  held = max(1, min(held, ACC_PRESS_MAX_FRAMES))
+  age = time.time() - (int(ts) / 1000.0 if ts.isdigit() else 0.0)
+  why = None
+  if name not in acc_button.REQUESTS:
+    why = "unknown or forbidden button"
+  elif age > ACC_REQUEST_MAX_AGE_S:
+    why = "stale request (%.1f s old)" % age
+  elif not CS.cruiseState.enabled:
+    why = "ACC is switched on but not engaged"
+  elif time.time() - state["last"] < ACC_PRESS_MIN_GAP_S:
+    why = "pressed less than %d ms ago" % int(ACC_PRESS_MIN_GAP_S * 1000)
+  if why is not None:
+    cloudlog.warning("stock ACC button request ignored: %r (%s)" % (name, why))
+    return None
+
+  state["name"] = name
+  state["frames"] = held + 1        # +1 so the release frame follows the press
+  state["counter"] = 0
+  state["last"] = time.time()
+  cloudlog.info("stock ACC button press: %s (%d frames)" % (name, held))
+  return _one_button_frame(state)
+
+
 class Car:
   CI: CarInterfaceBase
   RI: RadarInterfaceBase
@@ -77,6 +149,8 @@ class Car:
     self.last_actuators_output = structs.CarControl.Actuators()
 
     self.params = Params()
+    # stock-ACC button presses (BYD): request consumed from ACC_REQUEST_PATH, see acc_button_frames
+    self.acc_button_state = {"name": None, "frames": 0, "counter": 0, "last": 0.0}
 
     self.can_callbacks = can_comm_callbacks(self.can_sock, self.pm.sock['sendcan'])
 
@@ -245,6 +319,14 @@ class Car:
       # send car controls over can
       now_nanos = self.can_log_mono_time if REPLAY else int(time.monotonic() * 1e9)
       self.last_actuators_output, can_sends = self.CI.apply(CC, now_nanos)
+
+      # Stock-ACC button press requested by the app (BYD). Appended to card's own CAN sends on purpose:
+      # 'sendcan' has exactly one publisher and it is this process - see acc_button.py.
+      if self.CP.brand == "byd":
+        button_frames = acc_button_frames(CS, self.acc_button_state)
+        if button_frames is not None:
+          can_sends = list(can_sends) + button_frames
+
       self.pm.send('sendcan', can_list_to_can_capnp(can_sends, msgtype='sendcan', valid=CS.canValid))
 
       self.CC_prev = CC
