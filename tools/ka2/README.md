@@ -13,9 +13,26 @@ Nothing here is a driving feature on its own. Read the traps before touching it.
 | `ka2_acc_press.py` | one button press. Writes a request file; never transmits. |
 | `ka2_vision_acc.py` | the vision → ACC bridge: steps the setpoint down for a bend the model sees, hands it back afterwards. Off unless enabled. |
 | `ka2-vision-acc.service` | systemd unit for the bridge. Runs as `kommu` (it must read openpilot's msgq). |
+| `bt_settings_service.py` | the box's settings service: serves every app row, including the tuning knobs, and takes the app's writes. |
+| `ka2bt.service` | systemd unit for that service. The app's other end. |
 
 Inside the car port, the other half lives in the repo: `opendbc/car/byd/acc_button.py` (frame builder) and a
 hook in `selfdrive/car/card.py` that appends the frame to the CAN card already publishes.
+
+## The two limits in the app
+
+The bridge's two safety limits are ordinary live knobs, so they appear in the app next to the lane-correction
+rows. No APK change is needed: the app renders whatever rows the box serves, and the service discovers each
+row's range and shipped default by parsing `TUNING_LIMITS` out of the *deployed* file with `ast` (never
+exec'd) - so a build that stopped reading the tuning file shows its rows as inert instead of pretending.
+
+| row | key | range | shipped | effect |
+| --- | --- | --- | --- | --- |
+| Auto-slow floor (km/h) | `VIS_TURN_ACC_MIN_SETPOINT_KMH` | 30-90 | 30 | the bridge never steps the ACC setpoint below this. Raise only. |
+| Auto-raise ceiling (km/h) | `VIS_TURN_ACC_MAX_RESTORE_KMH` | 60-130 | 130 | never hands the speed back above this, on top of never exceeding the setpoint you set. Lower only. |
+
+Both ranges are one-sided on purpose: the file can only ever make the car do **less** than the committed
+design. A file asking for floor 5 / ceiling 200 reads back as 30 / 130.
 
 ## Why it is shaped like this
 
