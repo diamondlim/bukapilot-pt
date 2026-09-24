@@ -59,7 +59,8 @@ TRIGGER_S = 3.0              # start stepping this many seconds before the bend 
 MAX_STEPS = 3                # at most 15 km/h taken off per bend
 COOLDOWN_S = 2.5             # s between any two presses
 RESTORE_MARGIN_KMH = 5.0     # headroom the road must allow above the next step before raising
-MIN_SETPOINT_KMH = 30.0      # never step the setpoint below this
+MIN_SETPOINT_KMH = 30.0      # the auto-slow floor: never step the setpoint below this
+MAX_RESTORE_KMH = 130.0      # the auto-raise ceiling: never lift the setpoint above this
 BEND_CLEAR_S = 2.0           # no bend for this long = behind us; the next bend gets a fresh budget
 MIN_PTS = 8                  # grid points within 30% of the peak = a real bend, not a geometry spike
 
@@ -73,12 +74,15 @@ TUNING_LIMITS = {
   "VIS_TURN_ACC_MAX_STEPS": (0.0, 3.0),
   "VIS_TURN_ACC_COOLDOWN_S": (2.5, 15.0),
   "VIS_TURN_ACC_RESTORE_MARGIN_KMH": (5.0, 25.0),
+  "VIS_TURN_ACC_MIN_SETPOINT_KMH": (30.0, 90.0),   # the app's auto-slow floor: raise only, never lower
+  "VIS_TURN_ACC_MAX_RESTORE_KMH": (60.0, 130.0),   # the app's auto-raise ceiling: lower only, never raise
 }
 _LAST_GOOD = {
   "VIS_TURN_ACC_ENABLED": ENABLED, "VIS_TURN_ACC_RESTORE": RESTORE, "VIS_TURN_ACC_A_LAT": A_LAT,
   "VIS_TURN_ACC_MIN_RADIUS": MIN_RADIUS, "VIS_TURN_ACC_MIN_V_KMH": MIN_V_KMH,
   "VIS_TURN_ACC_MARGIN_KMH": MARGIN_KMH, "VIS_TURN_ACC_MAX_STEPS": MAX_STEPS,
   "VIS_TURN_ACC_COOLDOWN_S": COOLDOWN_S, "VIS_TURN_ACC_RESTORE_MARGIN_KMH": RESTORE_MARGIN_KMH,
+  "VIS_TURN_ACC_MIN_SETPOINT_KMH": MIN_SETPOINT_KMH, "VIS_TURN_ACC_MAX_RESTORE_KMH": MAX_RESTORE_KMH,
 }
 
 
@@ -187,12 +191,14 @@ def decide(state, tuning, v_kmh, setpoint_kmh, engaged, now):
     return None, "pressed %.1f s ago" % (now - state["last_press"])
 
   cap = state["cap_kmh"]
+  floor = tuning["VIS_TURN_ACC_MIN_SETPOINT_KMH"]     # the app's auto-slow floor
+  ceiling = tuning["VIS_TURN_ACC_MAX_RESTORE_KMH"]   # the app's auto-raise ceiling
 
   # 1. Slow for a bend that needs it. This outranks restoring: this policy never raises the setpoint while
   #    the road ahead still demands something slower.
   if cap is not None:
-    if setpoint_kmh <= MIN_SETPOINT_KMH:
-      return None, "setpoint already at the %.0f km/h floor" % MIN_SETPOINT_KMH
+    if setpoint_kmh <= floor:
+      return None, "setpoint already at the %.0f km/h floor" % floor
     if cap <= setpoint_kmh - tuning["VIS_TURN_ACC_MARGIN_KMH"]:
       if state["d_m"] is not None and state["d_m"] > max(30.0, v_kmh / 3.6 * TRIGGER_S):
         return None, "bend is %.0f m away" % state["d_m"]
@@ -201,15 +207,18 @@ def decide(state, tuning, v_kmh, setpoint_kmh, engaged, now):
       return "down", "bend allows %.0f km/h, setpoint %.0f km/h, %.0f m ahead" % (
         cap, setpoint_kmh, state["d_m"] or 0.0)
 
-  # 2. Hand the speed back, but only up to the setpoint the driver had before we touched it, and only when
-  #    the road geometry actually allows that speed.
+  # 2. Hand the speed back, but only up to the setpoint the driver had before we touched it and never above
+  #    the app's auto-raise ceiling, and only when the road geometry actually allows that speed.
   if tuning["VIS_TURN_ACC_RESTORE"] and state["lowered_kmh"] > 0:
-    ceiling = state["base_kmh"]
-    if ceiling is None:
+    driver_kmh = state["base_kmh"]
+    if driver_kmh is None:
       return None, "no ceiling recorded yet"
-    if setpoint_kmh >= ceiling - 0.5:
-      return None, "already back at the driver's %.0f km/h" % ceiling
-    nxt = min(setpoint_kmh + STEP_KMH, ceiling)
+    target = min(driver_kmh, ceiling)
+    if setpoint_kmh >= target - 0.5:
+      if driver_kmh > ceiling + 0.5:
+        return None, "held at the %.0f km/h auto-raise ceiling" % ceiling
+      return None, "already back at the driver's %.0f km/h" % target
+    nxt = min(setpoint_kmh + STEP_KMH, target)
     if cap is not None and cap < nxt + tuning["VIS_TURN_ACC_RESTORE_MARGIN_KMH"]:
       return None, "road ahead allows %.0f km/h, not %.0f yet" % (cap, nxt)
     return "up", "road clear to %.0f km/h (bend allows %s)" % (nxt, ("%.0f" % cap) if cap else "nothing")
