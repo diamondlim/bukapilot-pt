@@ -274,6 +274,10 @@ def main():
 
   pm = messaging.PubMaster(['livePose'])
   sm = messaging.SubMaster(['carState', 'liveCalibration', 'cameraOdometry'], poll='cameraOdometry')
+  # carState is read non-blockingly in a polled reader and looks ~2 Hz, which
+  # fails the alive/avg-freq checks and poisons the validity flags downstream.
+  sm.ignore_average_freq.append('carState')
+  sm.ignore_alive.append('carState')
   # separate sensor sockets for efficiency
   sensor_sockets = [messaging.sub_sock(which, timeout=20) for which in ['accelerometer', 'gyroscope']]
   sensor_alive, sensor_valid, sensor_recv_time = defaultdict(bool), defaultdict(bool), defaultdict(float)

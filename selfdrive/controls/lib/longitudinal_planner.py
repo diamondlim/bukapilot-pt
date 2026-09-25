@@ -301,7 +301,12 @@ class LongitudinalPlanner:
   def publish(self, sm, pm):
     plan_send = messaging.new_message('longitudinalPlan')
 
-    plan_send.valid = sm.all_checks(service_list=['carState', 'controlsState', 'selfdriveState', 'radarState'])
+    # This platform has no radar; requiring radarState made the plan permanently invalid,
+    # which surfaced as a commIssue alert and an orange status LED on every drive.
+    check_services = ['carState', 'controlsState', 'selfdriveState']
+    if not self.CP.radarUnavailable:
+      check_services.append('radarState')
+    plan_send.valid = sm.all_checks(service_list=check_services)
 
     longitudinalPlan = plan_send.longitudinalPlan
     longitudinalPlan.modelMonoTime = sm.logMonoTime['modelV2']

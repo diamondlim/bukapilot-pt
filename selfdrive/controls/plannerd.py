@@ -22,6 +22,10 @@ def main():
   pm = messaging.PubMaster(['longitudinalPlan', 'driverAssistance'])
   sm = messaging.SubMaster(['carControl', 'carState', 'controlsState', 'liveParameters', 'radarState', 'modelV2', 'selfdriveState'],
                            poll='modelV2')
+  # same carState starvation; without this longitudinalPlan.valid is False,
+  # which raises commIssue (a NO_ENTRY alert) on every drive.
+  sm.ignore_average_freq.append('carState')
+  sm.ignore_alive.append('carState')
 
   while True:
     sm.update()

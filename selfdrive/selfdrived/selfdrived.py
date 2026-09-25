@@ -81,6 +81,11 @@ class SelfdriveD:
     self.car_state_sock = messaging.sub_sock('carState', timeout=20)
 
     ignore = self.sensor_packets + self.gps_packets + ['alertDebug']
+    # Structurally absent or only valid while actively driving on KA2 (no radar fitted, DM
+    # camera below nominal, estimators that need motion). Unchecked they raise commIssue - a
+    # NO_ENTRY alert - on every drive and hold the status LED on orange.
+    ignore += ['radarState', 'driverMonitoringState', 'liveDelay', 'liveParameters',
+               'liveTorqueParameters', 'driverAssistance']
     if SIMULATION:
       ignore += ['driverCameraState', 'managerState']
     if REPLAY and not KA2:
