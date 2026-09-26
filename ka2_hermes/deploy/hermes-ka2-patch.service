@@ -1,0 +1,10 @@
+[Unit]
+Description=Hermes KA2 patch (keep openpilot from wedging in selfdriveInitializing)
+After=local-fs.target
+Before=kommu.service
+[Service]
+Type=oneshot
+ExecStart=/usr/kommu/hermes_ka2_patch.sh
+RemainAfterExit=yes
+[Install]
+WantedBy=multi-user.target

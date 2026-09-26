@@ -1,0 +1,13 @@
+[Unit]
+Description=KA2 Bluetooth settings service (Hermes)
+After=bluetooth.service
+Requires=bluetooth.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /data/hermes/bt_settings_service.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,22 @@
+[Unit]
+Description=KA2 vision -> stock ACC setpoint bridge (active only when VIS_TURN_ACC_ENABLED=1)
+Documentation=file:/data/hermes/ka2_vision_acc.py
+After=kommu.service
+Wants=kommu.service
+
+[Service]
+# kommu, not root: it reads openpilot's msgq (root gets Permission denied on /dev/shm/msgq_*) and it runs
+# the press tool as the same user, which is what card and the audit file expect.
+Type=simple
+User=kommu
+Group=kommu
+WorkingDirectory=/data/openpilot
+Environment=PYTHONPATH=/data/openpilot
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/local/venv/bin/python3 /data/hermes/ka2_vision_acc.py --live
+Restart=on-failure
+RestartSec=5
+# No hardening sandbox here: this needs the same view of the box that the press tool has.
+
+[Install]
+WantedBy=multi-user.target
